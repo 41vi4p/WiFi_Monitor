@@ -14,7 +14,7 @@ A collection of ESP32-C6 based cybersecurity demonstration projects featuring Wi
 - Real-time graphs and statistics
 - 1.47" LCD display with live updates
 - RGB LED status indicators
-
+/dev/ttyACM0
 **Hardware Requirements:**
 - ESP32-C6 board
 - 1.47" ST7789 LCD (172x320)

@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""
+WiFi Sniffer Analysis Dashboard - Streamlit Version
+Receives data from ESP32 and displays comprehensive WiFi network analytics with better visualizations
+"""
+
+import streamlit as st
+import serial
+import threading
+import time
+from datetime import datetime, timedelta
+from collections import defaultdict, deque
+import math
+import json
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from pathlib import Path
+
+# Page config
+st.set_page_config(
+    page_title="WiFi Sniffer Dashboard",
+    page_icon="📡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+class WiFiDevice:
+    """Represents a WiFi device with tracking data"""
+    def __init__(self, mac):
+        self.mac = mac
+        self.rssi_history = deque(maxlen=60)
+        self.first_seen = time.time()
+        self.last_seen = time.time()
+        self.packet_count = 0
+        self.channel = 0
+        self.probe_reqs = 0
+        self.max_rssi = -100
+        self.current_rssi = -100
+        
+    def update(self, rssi, channel, packets, probe_reqs):
+        self.current_rssi = rssi
+        self.max_rssi = max(self.max_rssi, rssi)
+        self.rssi_history.append(rssi)
+        self.channel = channel
+        self.packet_count = packets
+        self.probe_reqs = probe_reqs
+        self.last_seen = time.time()
+        
+    def get_signal_strength(self):
+        """Classify signal strength"""
+        if self.current_rssi >= -50:
+            return "Excellent"
+        elif self.current_rssi >= -60:
+            return "Good"
+        elif self.current_rssi >= -70:
+            return "Fair"
+        elif self.current_rssi >= -80:
+            return "Weak"
+        else:
+            return "Very Weak"
+    
+    def estimate_distance(self):
+        """Estimate distance from RSSI using Friis Free Space Equation"""
+        tx_power = -40
+        n = 2.0
+        if self.current_rssi == -100:
+            return None
+        distance = 10 ** ((tx_power - self.current_rssi) / (10 * n))
+        return max(0.5, min(distance, 100))
+
+class WiFiNetworkAnalyzer:
+    """Main analysis engine for WiFi network data"""
+    
+    def __init__(self):
+        self.devices = {}
+        self.stats = {
+            'total_packets': 0,
+            'active_devices': 0,
+            'unique_devices': 0,
+            'beacons': 0,
+            'probe_requests': 0,
+            'probe_responses': 0,
+            'deauth_attacks': 0,
+            'disassoc_attacks': 0,
+            'current_channel': 1,
+            'attack_detected': False,
+            'attack_type': 'None'
+        }
+        self.attack_history = deque(maxlen=60)
+        self.device_count_history = deque(maxlen=60)
+        self.suspicious_devices = set()
+        
+    def update_from_esp_data(self, data_dict):
+        """Process data received from ESP32"""
+        self.stats['active_devices'] = data_dict.get('ACT', 0)
+        self.stats['unique_devices'] = data_dict.get('DEV', 0)
+        self.stats['total_packets'] = data_dict.get('PKT', 0)
+        self.stats['attack_detected'] = data_dict.get('ATTACK', 0) == 1
+        self.stats['attack_type'] = data_dict.get('TYPE', 'None')
+        self.stats['beacons'] = data_dict.get('BEA', 0)
+        self.stats['probe_requests'] = data_dict.get('PRQ', 0)
+        self.stats['probe_responses'] = data_dict.get('PRR', 0)
+        self.stats['deauth_attacks'] = data_dict.get('DEA', 0)
+        
+        self.device_count_history.append(self.stats['active_devices'])
+        self.attack_history.append(1 if self.stats['attack_detected'] else 0)
+        
+        if 'devices_list' in data_dict:
+            self.update_devices(data_dict['devices_list'])
+    
+    def update_devices(self, device_list):
+        """Update tracked devices from device list"""
+        for dev_data in device_list:
+            mac, rssi, packets, channel, probe_reqs = dev_data
+            
+            if mac not in self.devices:
+                self.devices[mac] = WiFiDevice(mac)
+            
+            rssi_int = int(rssi)
+            self.devices[mac].update(rssi_int, int(channel), int(packets), int(probe_reqs))
+            
+            if int(probe_reqs) > 50:
+                self.suspicious_devices.add(mac)
+    
+    def get_top_devices(self, n=10):
+        """Get top N devices by signal strength"""
+        sorted_devices = sorted(
+            self.devices.items(),
+            key=lambda x: x[1].max_rssi,
+            reverse=True
+        )
+        return sorted_devices[:n]
+    
+    def get_closest_devices(self, n=5):
+        """Get closest devices by signal strength"""
+        sorted_devices = sorted(
+            self.devices.items(),
+            key=lambda x: x[1].current_rssi,
+            reverse=True
+        )
+        return sorted_devices[:n]
+
+class SerialDataReceiver(threading.Thread):
+    """Background thread to receive serial data from ESP32"""
+    
+    def __init__(self, port='/dev/ttyUSB0', baudrate=115200):
+        super().__init__(daemon=True)
+        self.port = port
+        self.baudrate = baudrate
+        self.running = False
+        self.analyzer = WiFiNetworkAnalyzer()
+        self.ser = None
+        
+    def run(self):
+        """Main loop - receive and parse serial data"""
+        try:
+            self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
+            print(f"Connected to {self.port} at {self.baudrate} baud")
+            self.running = True
+            
+            while self.running:
+                try:
+                    if self.ser.in_waiting:
+                        line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                        
+                        if line.startswith('$DATA|'):
+                            parsed_data = self.parse_esp_data(line)
+                            if parsed_data:
+                                self.analyzer.update_from_esp_data(parsed_data)
+                        else:
+                            print(f"[ESP]: {line}")
+                    
+                    time.sleep(0.01)
+                    
+                except Exception as e:
+                    print(f"Error processing data: {e}")
+                    time.sleep(0.5)
+            
+            if self.ser:
+                self.ser.close()
+            
+        except serial.SerialException as e:
+            print(f"Serial connection error: {e}")
+    
+    def parse_esp_data(self, line):
+        """Parse data from ESP32 format"""
+        try:
+            data_str = line.replace('$DATA|', '').replace('|END', '')
+            
+            parsed = {}
+            devices_list = []
+            
+            parts = data_str.split('|')
+            for part in parts:
+                if part.startswith('DEVICES:'):
+                    # Parse device data - format: MAC,RSSI,Packets,Channel,ProbeReqs;MAC,RSSI,...
+                    dev_data = part.replace('DEVICES:', '')
+                    if dev_data:
+                        for dev_entry in dev_data.split(';'):
+                            if dev_entry and dev_entry.strip():
+                                fields = dev_entry.split(',')
+                                if len(fields) >= 5:
+                                    devices_list.append(fields)
+                    parsed['devices_list'] = devices_list
+                elif ':' in part and ',' not in part:
+                    # Parse key:value pairs
+                    key, value = part.split(':', 1)
+                    try:
+                        parsed[key] = int(value) if value.isdigit() else value
+                    except:
+                        parsed[key] = value
+            
+            return parsed if parsed else None
+            
+        except Exception as e:
+            print(f"Parse error: {e}")
+            return None
+    
+    def stop(self):
+        """Stop the receiver thread"""
+        self.running = False
+        if self.ser:
+            self.ser.close()
+
+# Initialize session state
+if 'receiver' not in st.session_state:
+    st.session_state.receiver = None
+if 'connected' not in st.session_state:
+    st.session_state.connected = False
+
+# Auto-refresh every 500ms
+import streamlit as st
+st.set_page_config(page_title="WiFi Sniffer Dashboard", page_icon="📡", layout="wide", initial_sidebar_state="expanded")
+
+# Auto-rerun
+import time as time_module
+if 'last_rerun' not in st.session_state:
+    st.session_state.last_rerun = time_module.time()
+
+# Force refresh every 500ms
+time_since_rerun = time_module.time() - st.session_state.last_rerun
+if time_since_rerun > 0.5:
+    st.session_state.last_rerun = time_module.time()
+    st.rerun()
+
+# Sidebar controls
+with st.sidebar:
+    st.title("⚙️ Configuration")
+    
+    port = st.text_input("Serial Port", value="/dev/ttyACM1")
+    baudrate = st.selectbox("Baud Rate", [9600, 115200, 230400], index=1)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔗 Connect", use_container_width=True):
+            if st.session_state.receiver is None:
+                st.session_state.receiver = SerialDataReceiver(port, baudrate)
+                st.session_state.receiver.start()
+                st.session_state.connected = True
+                st.success("Connected!")
+            st.rerun()
+    
+    with col2:
+        if st.button("🔌 Disconnect", use_container_width=True):
+            if st.session_state.receiver:
+                st.session_state.receiver.stop()
+                st.session_state.receiver = None
+                st.session_state.connected = False
+                st.info("Disconnected")
+            st.rerun()
+    
+    st.markdown("---")
+    st.info(f"Status: {'🟢 Connected' if st.session_state.connected else '🔴 Disconnected'}")
+
+# Main dashboard
+st.title("📡 WiFi Network Sniffer Dashboard")
+
+# Get current analyzer data
+analyzer = st.session_state.receiver.analyzer if st.session_state.receiver else None
+
+if analyzer:
+    # Key metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("Active Devices", analyzer.stats['active_devices'])
+    with col2:
+        st.metric("Unique Devices", analyzer.stats['unique_devices'])
+    with col3:
+        st.metric("Total Packets", analyzer.stats['total_packets'])
+    with col4:
+        st.metric("Beacons", analyzer.stats['beacons'])
+    with col5:
+        if analyzer.stats['attack_detected']:
+            st.metric("⚠️ Attack", analyzer.stats['attack_type'], delta="DETECTED", delta_color="inverse")
+        else:
+            st.metric("Status", "Normal", delta="Safe", delta_color="normal")
+    
+    st.markdown("---")
+    
+    # Display all detected MAC addresses
+    st.subheader("📡 All Detected Devices (MAC Addresses)")
+    
+    if analyzer.devices:
+        mac_list = []
+        for mac, dev in sorted(analyzer.devices.items(), key=lambda x: x[1].current_rssi, reverse=True):
+            distance = dev.estimate_distance()
+            distance_str = f"{distance:.1f}m" if distance else "N/A"
+            mac_list.append({
+                'MAC Address': mac,
+                'Signal (dBm)': dev.current_rssi,
+                'Packets': dev.packet_count,
+                'Channel': dev.channel,
+                'Distance': distance_str,
+                'Strength': dev.get_signal_strength()
+            })
+        
+        mac_df = pd.DataFrame(mac_list)
+        st.dataframe(mac_df, use_container_width=True, height=400)
+        
+        # Copy-friendly MAC list
+        with st.expander("📋 Copy MAC List"):
+            mac_text = "\n".join([d['MAC Address'] for d in mac_list])
+            st.text_area("MAC Addresses (one per line):", value=mac_text, height=200, disabled=True)
+    else:
+        st.warning("⏳ Waiting for devices... Make sure ESP32 is connected and transmitting data")
+    
+    st.markdown("---")
+    
+    # Charts
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Device timeline
+        st.subheader("📈 Active Devices Over Time")
+        device_df = pd.DataFrame({
+            'Time': range(len(analyzer.device_count_history)),
+            'Active Devices': list(analyzer.device_count_history)
+        })
+        
+        fig_devices = px.area(
+            device_df,
+            x='Time',
+            y='Active Devices',
+            title="Active Device Timeline",
+            markers=True,
+            template="plotly_dark"
+        )
+        fig_devices.update_layout(height=300, showlegend=False)
+        st.plotly_chart(fig_devices, use_container_width=True)
+    
+    with col2:
+        # Attack history
+        st.subheader("⚠️ Attack Detection Timeline")
+        attack_df = pd.DataFrame({
+            'Time': range(len(analyzer.attack_history)),
+            'Attacks': list(analyzer.attack_history)
+        })
+        
+        fig_attacks = go.Figure()
+        fig_attacks.add_trace(go.Scatter(
+            x=attack_df['Time'],
+            y=attack_df['Attacks'],
+            mode='lines',
+            fill='tozeroy',
+            name='Attacks',
+            line=dict(color='red')
+        ))
+        fig_attacks.update_layout(height=300, showlegend=False, title="Attack Timeline", template="plotly_dark")
+        st.plotly_chart(fig_attacks, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Top devices
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("🎯 Top 10 Strongest Signals")
+        top_devices = analyzer.get_top_devices(10)
+        
+        if top_devices:
+            top_df = pd.DataFrame([
+                {
+                    'MAC': mac,
+                    'Signal (dBm)': dev.max_rssi,
+                    'Current (dBm)': dev.current_rssi,
+                    'Packets': dev.packet_count,
+                    'Channel': dev.channel,
+                    'Distance (m)': f"{dev.estimate_distance():.1f}" if dev.estimate_distance() else "N/A"
+                }
+                for mac, dev in top_devices
+            ])
+            st.dataframe(top_df, use_container_width=True)
+        else:
+            st.info("No devices detected yet")
+    
+    with col2:
+        st.subheader("📍 Closest Devices")
+        closest_devices = analyzer.get_closest_devices(5)
+        
+        if closest_devices:
+            closest_df = pd.DataFrame([
+                {
+                    'MAC': mac,
+                    'Signal (dBm)': dev.current_rssi,
+                    'Distance (m)': f"{dev.estimate_distance():.1f}" if dev.estimate_distance() else "N/A",
+                    'Strength': dev.get_signal_strength(),
+                    'Probe Reqs': dev.probe_reqs
+                }
+                for mac, dev in closest_devices
+            ])
+            st.dataframe(closest_df, use_container_width=True)
+        else:
+            st.info("No devices detected yet")
+    
+    st.markdown("---")
+    
+    # Attack statistics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Deauth Attacks", analyzer.stats['deauth_attacks'])
+    with col2:
+        st.metric("Disassoc Attacks", analyzer.stats['disassoc_attacks'])
+    with col3:
+        st.metric("Probe Requests", analyzer.stats['probe_requests'])
+    with col4:
+        st.metric("Probe Responses", analyzer.stats['probe_responses'])
+    
+    # RSSI signal distribution
+    st.subheader("📊 Signal Strength Distribution")
+    
+    if analyzer.devices:
+        rssi_data = [dev.current_rssi for dev in analyzer.devices.values() if dev.current_rssi != -100]
+        
+        if rssi_data:
+            fig_rssi = px.histogram(
+                x=rssi_data,
+                nbins=20,
+                labels={'x': 'RSSI (dBm)', 'y': 'Count'},
+                title="Signal Strength Distribution",
+                template="plotly_dark"
+            )
+            fig_rssi.update_layout(height=300)
+            st.plotly_chart(fig_rssi, use_container_width=True)
+    
+    # Debug panel
+    with st.expander("🐛 Debug Information"):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Devices Tracked", len(analyzer.devices))
+        with col2:
+            st.metric("History Size (Devices)", len(analyzer.device_count_history))
+        with col3:
+            st.metric("History Size (Attacks)", len(analyzer.attack_history))
+        with col4:
+            st.metric("Thread Running", st.session_state.receiver.running if st.session_state.receiver else False)
+        
+        st.write("**Last 5 Data Values:**")
+        st.write(f"Device History: {list(analyzer.device_count_history)[-5:]}")
+        st.write(f"Attack History: {list(analyzer.attack_history)[-5:]}")
+
+else:
+    st.warning("⚠️ Connect to ESP32 first using the sidebar controls")
+    
+    with st.expander("🔧 Troubleshooting"):
+        st.markdown("""
+        **If you can't see graphs or MAC addresses:**
+        
+        1. **Check ESP32 Connection:**
+           - Make sure ESP32 is plugged in via USB
+           - Verify the serial port (usually `/dev/ttyUSB0` or `/dev/ttyACM0` on Linux)
+           - Try `ls /dev/tty*` in terminal to find the port
+        
+        2. **Verify ESP32 Firmware:**
+           - Upload the latest `esp_sniffer.ino` to your ESP32
+           - Check the serial monitor for any error messages
+        
+        3. **Check Connection Status:**
+           - The sidebar should show 🟢 Connected when linked
+           - Watch for data messages in the terminal where Streamlit is running
+        
+        4. **Try different Serial Port:**
+           - Change the port in the sidebar settings
+           - Common ports: `/dev/ttyUSB0`, `/dev/ttyACM0`, `COM3`, `COM4`
+        
+        5. **Run diagnostics:**
+           - Open another terminal and run: `python utilities.py test`
+           - This will test your serial connection
+        """)
+
+# Refresh button in main area if there's no connection
+if not (st.session_state.receiver and st.session_state.connected):
+    st.markdown("---")
+    if st.button("🔄 Try Connecting Again"):
+        st.rerun()
+
