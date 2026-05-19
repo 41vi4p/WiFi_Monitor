@@ -25,7 +25,6 @@ Advanced WiFi security monitoring and analysis tool built on ESP32-C6 with real-
 
 ![WiFi Monitor Dashboard 2](images/Screenshot%20from%202026-05-19%2021-29-07.png)
 
-![WiFi Monitor Dashboard 3](images/Screenshot%20from%202026-05-19%2021-29-12.png)
 
 ## 📹 Demo & Resources
 
