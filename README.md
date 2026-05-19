@@ -159,7 +159,9 @@ Advanced WiFi security monitoring and analysis tool built on ESP32-C6 with real-
 
 ## 📄 License
 
-This project is for educational and research purposes. Use responsibly and in compliance with applicable laws and regulations.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+The MIT License is a permissive open-source license that allows you to use, modify, and distribute this software freely, as long as you include a copy of the original license and copyright notice.
 
 ## ⚠️ Disclaimer
 
