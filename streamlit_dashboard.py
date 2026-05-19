@@ -29,6 +29,7 @@ class WiFiDevice:
         self.probe_reqs = 0
         self.current_rssi = -100
         self.max_rssi = -100
+        self.last_seen = time.time()  # Track when device was last seen
         
     def update(self, rssi, channel, packets, probe_reqs):
         self.current_rssi = int(rssi)
@@ -37,6 +38,7 @@ class WiFiDevice:
         self.channel = int(channel)
         self.packet_count = int(packets)
         self.probe_reqs = int(probe_reqs)
+        self.last_seen = time.time()  # Update timestamp when device is seen
     
     def get_distance(self):
         if self.current_rssi == -100:
@@ -67,6 +69,7 @@ class WiFiNetworkAnalyzer:
             'BEA': 0, 'PRQ': 0, 'PRR': 0, 'DEA': 0
         }
         self.history = deque(maxlen=60)
+        self.device_timeout = 45  # seconds - remove devices not seen for 45s
         
     def parse_line(self, line):
         """Parse ESP32 data line"""
@@ -97,14 +100,34 @@ class WiFiNetworkAnalyzer:
                     key = key.strip()
                     val = val.strip()
                     try:
-                        self.stats[key] = int(val) if val.isdigit() else val
+                        # Special handling for ATTACK to ensure it's an int
+                        if key == 'ATTACK':
+                            self.stats[key] = int(val) if val.isdigit() else (1 if val == 'True' else 0)
+                        else:
+                            self.stats[key] = int(val) if val.isdigit() else val
                     except:
                         self.stats[key] = val
+            
+            # Remove stale devices and update unique device count
+            self.cleanup_stale_devices()
+            self.stats['DEV'] = len(self.devices)
             
             self.history.append(self.stats['ACT'])
             return True
         except Exception as e:
             return False
+    
+    def cleanup_stale_devices(self):
+        """Remove devices not seen within the timeout period"""
+        current_time = time.time()
+        stale_devices = []
+        
+        for mac, device in self.devices.items():
+            if current_time - device.last_seen > self.device_timeout:
+                stale_devices.append(mac)
+        
+        for mac in stale_devices:
+            del self.devices[mac]
 
 # ===== Serial Reader Class =====
 class SerialReader(threading.Thread):
@@ -194,7 +217,8 @@ if st.session_state.connected and st.session_state.reader:
     with col4:
         st.metric("Beacons", analyzer.stats['BEA'])
     with col5:
-        if analyzer.stats['ATTACK']:
+        attack_value = int(analyzer.stats['ATTACK']) if isinstance(analyzer.stats['ATTACK'], (int, str)) else 0
+        if attack_value:
             st.metric("⚠️ Status", "ATTACK!", delta="DETECTED", delta_color="inverse")
         else:
             st.metric("✅ Status", "Safe", delta_color="normal")
@@ -274,7 +298,8 @@ if st.session_state.connected and st.session_state.reader:
     with col3:
         st.metric("Probe Responses", analyzer.stats['PRR'])
     with col4:
-        if analyzer.stats['ATTACK']:
+        attack_value = int(analyzer.stats['ATTACK']) if isinstance(analyzer.stats['ATTACK'], (int, str)) else 0
+        if attack_value:
             st.metric("🚨 Alert", analyzer.stats['TYPE'], delta="Active")
         else:
             st.metric("✅ Alert", "None", delta="Normal")
