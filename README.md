@@ -1,27 +1,41 @@
-# Cyber Presentation - ESP32-C6 Projects
+# WiFi_Monitor
 
-A collection of ESP32-C6 based cybersecurity demonstration projects featuring WiFi monitoring, Bluetooth emulation, and person counting capabilities.
+Advanced WiFi security monitoring and analysis tool built on ESP32-C6 with real-time threat detection, network analysis, and visual feedback systems.
 
-## 📁 Projects
+## 🔍 Main Project: WiFi Security Monitor
 
-### 🔍 ESP Monitor (`esp_monitor/`)
-**WiFi Security Monitor** - Real-time WiFi network security analysis tool.
+**WiFi_Monitor** - Enterprise-grade WiFi network security analysis and monitoring system.
 
-**Features:**
+**Core Features:**
 - Deauthentication attack detection
 - Beacon spam monitoring
 - Channel activity analysis
 - Real-time graphs and statistics
 - 1.47" LCD display with live updates
 - RGB LED status indicators
-/dev/ttyACM0
+
 **Hardware Requirements:**
 - ESP32-C6 board
 - 1.47" ST7789 LCD (172x320)
 - WS2812 RGB LED
 
+## � Screenshots
+
+![WiFi Monitor Dashboard 1](images/Screenshot%20from%202026-05-19%2021-28-57.png)
+
+![WiFi Monitor Dashboard 2](images/Screenshot%20from%202026-05-19%2021-29-07.png)
+
+![WiFi Monitor Dashboard 3](images/Screenshot%20from%202026-05-19%2021-29-12.png)
+
+## 📹 Demo & Resources
+
+- **Presentation**: [View on Canva](https://canva.link/z7m6m2u5pvj6czr)
+- **Video Demo**: [Watch on Google Drive](https://drive.google.com/file/d/1nqEuqVf62X9uQBtQGYM96E0nbY2Anv80/view?usp=sharing)
+
+## �📁 Additional Projects
+
 ### 👥 Person Counter (`count_persons/`)
-**WiFi-based Occupancy Counter** - Estimates room occupancy by detecting unique WiFi devices.
+**WiFi-based Occupancy Counter** - Complimentary module for room occupancy detection.
 
 **Features:**
 - Promiscuous mode WiFi scanning
